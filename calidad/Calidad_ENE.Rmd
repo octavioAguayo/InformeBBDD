@@ -1,0 +1,141 @@
+---
+title: "Calidad ENE"
+output: html_notebook
+---
+
+_v5 · 22-08-2026_
+
+```{r configuracion}
+raiz_proyecto <- if (basename(getwd()) == "calidad") {
+  normalizePath("..")
+} else {
+  normalizePath(getwd())
+}
+knitr::opts_knit$set(root.dir = raiz_proyecto)
+source(file.path(raiz_proyecto, "calidad", "funciones_calidad.R"))
+source(file.path(dirname(raiz_proyecto), "Bibliotecas_R",
+                 "fc_diccionario_ene.R"))
+ruta_bases <- file.path(dirname(dirname(raiz_proyecto)),
+                        "Datos_Ine", "ENE", "bbdd_minuta")
+ruta_metadatos_ene <- file.path(dirname(dirname(raiz_proyecto)),
+                                "Datos_Ine", "ENE", "metadatos")
+```
+
+## Versiones y vigencia de productos
+
+La fecha sólo detecta productos evidentemente anteriores a sus productores; no
+demuestra por sí sola que una ejecución haya usado el código actual.
+
+```{r control-versiones}
+control_versiones <- fc_calidad_versiones(raiz_proyecto)
+control_versiones
+```
+
+```{r vigencia-productos}
+vigencia_productos <- fc_calidad_productos(
+  raiz_proyecto, ruta_bases, ruta_metadatos_ene
+)
+vigencia_productos
+```
+
+## Carga de bases
+
+```{r cargar-bases}
+dt_ENE_Stata <- fc_calidad_cargar(
+  file.path(ruta_bases, "dt_ENE_Stata.RData"), "dt_ENE_Stata"
+)
+dt_ENE_Excel <- fc_calidad_cargar(
+  file.path(ruta_bases, "BBDD_Excel_Master.RData"), "dt_ENE_Excel"
+)
+dt_Series_Excel <- fc_calidad_cargar(
+  file.path(ruta_bases, "BBDD_Series.RData"), "dt_Series_Excel"
+)
+dt_Coyuntural <- fc_calidad_cargar(
+  file.path(ruta_bases, "BBDD_Coyuntural.RData"), "dt_Coyuntural"
+)
+dt_ENE_Master <- fc_calidad_cargar(
+  file.path(ruta_bases, "dt_ENE_Master.RData"), "dt_ENE_Master"
+)
+resumen_base <- fc_calidad_cargar(
+  file.path(ruta_bases, "ENE_1_cubo.RData"), "resumen_base"
+)
+resumen_SexoRegion <- fc_calidad_cargar(
+  file.path(ruta_bases, "ENE_2_SexoRegionEdad.RData"), "resumen_SexoRegion"
+)
+diccionario <- fc_diccionario()
+```
+
+## Pipeline DTA
+
+```{r control-dta}
+calidad_dta <- fc_calidad_dta(dt_ENE_Stata)
+calidad_dta$resumen
+calidad_dta$familias_rama
+calidad_dta$duplicados
+```
+
+## Continuidad de períodos DTA
+
+```{r periodos-dta}
+dire_ene <- dirname(ruta_bases)
+fc_calidad_periodos_dta(
+  dire_ene, resumen_base, resumen_SexoRegion, dt_ENE_Stata
+)
+```
+
+## Pipeline Excel
+
+```{r control-excel}
+calidad_excel <- fc_calidad_excel(
+  dt_ENE_Excel, dt_Series_Excel, dt_Coyuntural
+)
+calidad_excel$resumen
+calidad_excel$duplicados
+calidad_excel$duplicados_series
+calidad_excel$duplicados_coyuntural
+calidad_excel$composicion
+calidad_excel$cobertura
+```
+
+## Comparación DTA y Excel
+
+```{r comparar-fuentes}
+calidad_fuentes <- fc_calidad_fuentes(dt_ENE_Stata, dt_ENE_Excel)
+calidad_fuentes$categorias
+calidad_fuentes$valores_compartidos
+```
+
+## Master
+
+```{r control-master}
+calidad_master <- fc_calidad_master(
+  dt_ENE_Master, dt_ENE_Stata, dt_ENE_Excel, diccionario
+)
+calidad_master$resumen
+calidad_master$periodos
+calidad_master$reconstruccion
+calidad_master$duplicados
+```
+
+## Canon de categorías
+
+```{r control-canon}
+calidad_master$canon$fuera_canon
+calidad_master$canon$casi_duplicadas
+calidad_master$canon$nunca_publicadas
+```
+
+## Variables, etiquetas y vigencias
+
+Este bloque usa las tablas técnicas producidas por `ENE_0b_BBDD_Etiquetas.R`.
+
+```{r metadatos}
+ruta_metadatos <- file.path(ruta_metadatos_ene, "ENE_0b_metadatos.RData")
+if (file.exists(ruta_metadatos)) {
+  entorno_metadatos <- new.env(parent = emptyenv())
+  load(ruta_metadatos, envir = entorno_metadatos)
+  entorno_metadatos$vigencia_variables
+  entorno_metadatos$etiquetas_inestables
+  entorno_metadatos$clasificacion
+}
+```

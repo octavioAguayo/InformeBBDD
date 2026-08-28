@@ -1,0 +1,603 @@
+# ==============================================================================
+# ENE_3_Derivadas_SexoRegionEdad.R
+# Calcula variables derivadas, aplica nombres canónicos, labels, vigencia,
+# agrega datos de edad y exporta dt_ENE_Stata
+# ==============================================================================
+# Entrada:  ENE_2_SexoRegionEdad.RData  (resumen_SexoRegion, resumen_Edad)
+# Salida:   ENE_3_Salida.RData  (dt_ENE_Stata)
+#           resumen_ENE_Wide.xlsx
+# ==============================================================================
+
+source(file.path(dirname(getwd()), "Bibliotecas_R", "funciones_ene.R"))
+
+fc_init_motor(c("dplyr", "tidyr", "lubridate", "openxlsx"))
+
+dire_out           <- file.path(dirname(dirname(getwd())), "Datos_Ine", "Procesados")
+fecha_Inicio_Covid <- as.Date("2020-01-01")
+
+# ==============================================================================
+# CARGAR COLAPSO ####
+# ==============================================================================
+
+load(file.path(dire_out, "ENE_2_SexoRegionEdad.RData"))
+
+# ==============================================================================
+# VARIABLES DERIVADAS ####
+# ==============================================================================
+
+# Base COVID para Deficit_form / Deficit_inform
+base_covid <- resumen_SexoRegion %>%
+  filter(fecha == fecha_Inicio_Covid) %>%
+  select(sexo, region, Ocup_formales, Ocup_informales, PET) %>%
+  rename(Ocup_form_base = Ocup_formales,
+         Ocup_inf_base  = Ocup_informales,
+         PET_base       = PET)
+
+resumen_wide <- resumen_SexoRegion %>%
+  left_join(base_covid, by = c("sexo", "region")) %>%
+  mutate(
+    # Agrupaciones
+    ServDom        = ServDom_afuera + ServDom_adentro,
+    Independientes = Empleadores + Cuenta_propia + Familiares_no_rem,
+    Dependientes   = Asal_privados + Asal_publico + ServDom_afuera + ServDom_adentro,
+    Asalariados    = Asal_privados + Asal_publico,
+    Asl_dep_Form   = AslPriv_form + AslPub_form + ServDom_form,
+    Asl_dep_Inform = AslPriv_inf  + AslPub_inf  + ServDom_inf,
+    Asl_dep        = Asl_dep_Form + Asl_dep_Inform,
+    Ocup_Privado   = Ocupados - Asal_publico,
+    
+    # Identidad por exclusión — ver nota metodológica en arquitectura_ENE_cubo.txt
+    H_TPV          = H_1_30 - H_TPI - H_TPI_SIvol,
+    
+    # Tasas
+    T_desocupacion  = round(Desocupados      / FT            * 100, 1),
+    T_ocupacion     = round(Ocupados         / PET           * 100, 1),
+    T_participacion = round(FT               / PET           * 100, 1),
+    T_Informal      = round(Ocup_informales  / Ocupados      * 100, 1),
+    T_Cesantia      = round(Cesantes         / FT            * 100, 1),
+    T_Btrab         = round(B_t_p_v          / FT            * 100, 1),
+    T_presion_lab   = round((Desocupados + Iniciadores_disp + Ocup_buscaron_empleo) /
+                              (FT + Iniciadores_disp)        * 100, 1),
+    SU1             = round((Desocupados + Iniciadores_disp) /
+                              (FT + Iniciadores_disp)        * 100, 1),
+    SU2             = round((Desocupados + Iniciadores_disp + Tiemp_parcial_involunt) /
+                              (FT + Iniciadores_disp)        * 100, 1),
+    SU3             = round((Desocupados + Iniciadores_disp + FT_potencial) /
+                              FT_ampliada                    * 100, 1),
+    SU4             = round((Desocupados + Iniciadores_disp +
+                               Tiemp_parcial_involunt + FT_potencial) /
+                              FT_ampliada                    * 100, 1),
+    
+    # Promedios de horas — usan auxiliares de paso
+    Prom_hef_con_aus = round(Hef_sum_con_aus / Hef_n_con_aus, 1),
+    Prom_hef_sin_aus = round(Hef_sum_sin_aus / Hef_n_sin_aus, 1),
+    Prom_hab         = round(Hab_sum         / Hab_n,         1),
+    
+    # Déficit
+    Form_PET       = round(Ocup_formales   / PET * 100, 1),
+    Inform_PET     = round(Ocup_informales / PET * 100, 1),
+    Deficit_form   = if_else(!is.na(Ocup_form_base),
+                             Ocup_formales  - (Ocup_form_base / PET_base) * PET,
+                             NA_real_),
+    Deficit_inform = if_else(!is.na(Ocup_inf_base),
+                             Ocup_informales - (Ocup_inf_base / PET_base) * PET,
+                             NA_real_)
+  ) %>%
+  select(-Ocup_form_base, -Ocup_inf_base, -PET_base)
+
+# Descartar auxiliares de paso
+resumen_wide <- resumen_wide %>%
+  select(-Hef_sum_con_aus, -Hef_n_con_aus,
+         -Hef_sum_sin_aus, -Hef_n_sin_aus,
+         -Hab_sum, -Hab_n)
+
+# ==============================================================================
+# VARIABLES DERIVADAS PARA EDAD ####
+# Solo tasas — las agrupaciones (ServDom, Independientes, etc.) no están
+# disponibles en resumen_Edad porque el colapso 2 solo trae stocks básicos
+# ==============================================================================
+
+resumen_Edad <- resumen_Edad %>%
+  mutate(
+    T_desocupacion  = round(Desocupados      / FT       * 100, 1),
+    T_ocupacion     = round(Ocupados         / PET      * 100, 1),
+    T_participacion = round(FT               / PET      * 100, 1),
+    T_Informal      = round(Ocup_informales  / Ocupados * 100, 1),
+    T_Cesantia      = round(Cesantes         / FT       * 100, 1),
+    T_Btrab         = round(B_t_p_v          / FT       * 100, 1)
+  )
+
+# ==============================================================================
+# PIVOT A FORMATO LARGO ####
+# ==============================================================================
+
+dt_ENE_Stata <- resumen_wide %>%
+  pivot_longer(
+    cols      = -c(periodo, fecha, sexo, region),
+    names_to  = "categoria_interna",
+    values_to = "valor"
+  ) %>%
+  filter(!is.na(valor))
+
+# ==============================================================================
+# TABLA DE MAPEO — nombre interno → nombre canónico ####
+# ==============================================================================
+
+tabla_nombres <- tribble(
+  ~categoria_interna,       ~categoria,
+  "Poblacion",              "Población",
+  "PET",                    "PET",
+  "FT",                     "FT",
+  "Ocupados",               "Ocupados",
+  "Desocupados",            "Desocupados",
+  "Cesantes",               "Cesantes",
+  "B_t_p_v",                "B_t_p_v",
+  "FFT",                    "FFT",
+  "FFT_Iniciadores",        "FFT_Iniciadores",
+  "FFT_Inactivos_PA",       "FFT_Inactivos_PA",
+  "FFT_Inactivos_H",        "FFT_Inactivos_H",
+  "Iniciadores_disp",       "Iniciadoras disponibles",
+  "Tiemp_parcial_involunt", "Tiempo parcial involuntario",
+  "Ocup_buscaron_empleo",   "Ocupados que buscaron empleo",
+  "FT_potencial",           "Fuerza de trabajo potencial",
+  "FT_ampliada",            "Fuerza de trabajo ampliada",
+  "Desea_trabajar",         "Desea trabajar",
+  "Empleadores",            "Empleadores",
+  "Cuenta_propia",          "Cuenta propia",
+  "Asal_privados",          "Asalariados privados",
+  "Asal_publico",           "Asalariados público",
+  "ServDom_afuera",         "Servicio doméstico afuera",
+  "ServDom_adentro",        "Servicio doméstico Adentro",
+  "ServDom",                "Servicio doméstico",
+  "Familiares_no_rem",      "Familiares no rem",
+  "Independientes",         "Independientes",
+  "Dependientes",           "Dependientes",
+  "Asalariados",            "Asalariados",
+  "Ocup_formales",          "Ocupados formales",
+  "Ocup_informales",        "Ocupados informales",
+  "Empl_form",              "Empleadores formales",
+  "Empl_inf",               "Empleadores informales",
+  "CtaProp_form",           "Cuenta propia formales",
+  "CtaProp_inf",            "Cuenta propia informales",
+  "AslPriv_form",           "Asalariados privado formales",
+  "AslPriv_inf",            "Asalariados privado informales",
+  "AslPub_form",            "Asalariados público formales",
+  "AslPub_inf",             "Asalariados público informales",
+  "ServDom_form",           "Servicio doméstico formales",
+  "ServDom_inf",            "Servicio doméstico informales",
+  "FamNoRem_inf",           "Familiar no rem informales",
+  "Asl_dep_Form",           "Asalariados_dep_Form",
+  "Asl_dep_Inform",         "Asalariados_dep_Inform",
+  "Asl_dep",                "Asalariados_dep",
+  "Ocup_Privado",           "Ocupado_Privado",
+  "T_desocupacion",         "T_desocupación",
+  "T_ocupacion",            "T_ocupación",
+  "T_participacion",        "T_participación",
+  "T_Informal",             "T_Informal",
+  "T_Cesantia",             "T_Cesantia",
+  "T_Btrab",                "T_Btrab",
+  "T_presion_lab",          "Tasa presión laboral",
+  "SU1",                    "Tasa desocupación + ID (SU1)",
+  "SU2",                    "Tasa desocupación + TPI (SU2)",
+  "SU3",                    "Tasa desocupación + FTP (SU3)",
+  "SU4",                    "Tasa subutilización (SU4)",
+  "Form_PET",               "Form_PET",
+  "Inform_PET",             "Inform_PET",
+  "Deficit_form",           "Deficit_form",
+  "Deficit_inform",         "Deficit_inform",
+  "GOcup_Dir",              "Directores, gerentes y administradores",
+  "GOcup_Prof",             "Profesionales, científicos e intelectuales",
+  "GOcup_Tec",              "Técnicos y profesionales de nivel medio",
+  "GOcup_Adm",              "Personal de apoyo administrativo",
+  "GOcup_Serv",             "Trabajadores de los servicios y vendedores de comercios y mercados",
+  "GOcup_Agr",              "Agricultores y trabajadores calificados agropecuarios, forestales y pesqueros",
+  "GOcup_Art",              "Artesanos y operarios de oficios",
+  "GOcup_Oper",             "Operadores de instalaciones, maquinas y ensambladores",
+  "GOcup_Elem",             "Ocupaciones elementales",
+  "GOcup_Dir_F",            "Directores, gerentes y administradores formal",
+  "GOcup_Prof_F",           "Profesionales, científicos e intelectuales formal",
+  "GOcup_Tec_F",            "Técnicos y profesionales de nivel medio formal",
+  "GOcup_Adm_F",            "Personal de apoyo administrativo formal",
+  "GOcup_Serv_F",           "Trabajadores de los servicios y vendedores de comercios y mercados formal",
+  "GOcup_Agr_F",            "Agricultores y trabajadores calificados agropecuarios, forestales y pesqueros formal",
+  "GOcup_Art_F",            "Artesanos y operarios de oficios formal",
+  "GOcup_Oper_F",           "Operadores de instalaciones, maquinas y ensambladores formal",
+  "GOcup_Elem_F",           "Ocupaciones elementales formal",
+  "GOcup_Dir_I",            "Directores, gerentes y administradores informal",
+  "GOcup_Prof_I",           "Profesionales, científicos e intelectuales informal",
+  "GOcup_Tec_I",            "Técnicos y profesionales de nivel medio informal",
+  "GOcup_Adm_I",            "Personal de apoyo administrativo informal",
+  "GOcup_Serv_I",           "Trabajadores de los servicios y vendedores de comercios y mercados informal",
+  "GOcup_Agr_I",            "Agricultores y trabajadores calificados agropecuarios, forestales y pesqueros informal",
+  "GOcup_Art_I",            "Artesanos y operarios de oficios informal",
+  "GOcup_Oper_I",           "Operadores de instalaciones, maquinas y ensambladores informal",
+  "GOcup_Elem_I",           "Ocupaciones elementales informal",
+  "Tam_Micro",              "Micro empresa",
+  "Tam_Peq",                "Pequeña empresa",
+  "Tam_Med",                "Mediana empresa",
+  "Tam_Gran",               "Gran empresa",
+  "Tam_SinClas",            "Sin clasificar por tamaño",
+  "Tam_Micro_form",         "Micro empresa formal",
+  "Tam_Micro_inf",          "Micro empresa informal",
+  "Tam_Peq_form",           "Pequeña empresa formal",
+  "Tam_Peq_inf",            "Pequeña empresa informal",
+  "Tam_Med_form",           "Mediana empresa formal",
+  "Tam_Med_inf",            "Mediana empresa informal",
+  "Tam_Gran_form",          "Gran empresa formal",
+  "Tam_Gran_inf",           "Gran empresa informal",
+  "Tam_SinClas_form",       "Sin clasificar por tamaño formal",
+  "Tam_SinClas_inf",        "Sin clasificar por tamaño informal",
+  "H_mas45_ef",             "Personas trabajaron más de 45 horas efectivas",
+  "H_declararon",           "Personas declararon horas trabajadas",
+  "H_TPI_SIvol",            "Personas a tiempo parcial S-I voluntariedad",
+  "Ocup_presentes",         "Ocupados presentes",
+  "Ocup_presentes_trad",    "Ocupados presentes tradicionales",
+  "Ocup_presentes_notrad",  "Ocupados presentes no tradicionales",
+  "Ocup_ausentes",          "Ocupados ausentes",
+  "Ocup_aus_vinculo",       "Ocupados ausentes con vínculo efectivo",
+  "Ocup_aus_retorno",       "Ocupados ausentes con pronto retorno",
+  "Ocup_aus_sueldo",        "Ocupados ausentes con sueldo o ganancias",
+  "FFT_Fam_perm",           "FFT Razones familiares permanentes",
+  "FFT_Estudio",            "FFT Razones de estudio",
+  "FFT_Jubilacion",         "FFT Razones de jubilación",
+  "FFT_Pension",            "FFT Razones de pensión o montepiado",
+  "FFT_Salud_perm",         "FFT Razones de salud permanentes",
+  "FFT_Pers_temp",          "FFT Razones personales temporales",
+  "FFT_Sin_deseo",          "FFT Sin deseos de trabajar",
+  "FFT_Estacional",         "FFT Razones estacionales",
+  "FFT_Desaliento",         "FFT Razones de desaliento",
+  "FFT_Otras",              "FFT Otras razones",
+  "H_1_30",                 "Personas trabajaron 1 - 30 horas habituales",
+  "H_31_44",                "Personas trabajaron 31 - 44 horas habituales",
+  "H_45",                   "Personas trabajaron 45 horas habituales",
+  "H_mas45",                "Personas trabajaron más de 45 horas habituales",
+  "H_TPI",                  "Personas tiempo parcial involuntario (TPI)",
+  "H_TPV",                  "Personas tiempo parcial voluntario (TPV)",
+  "Prom_hef_con_aus",       "Promedio horas efectivas a la semana (con ocupados ausentes)",
+  "Prom_hef_sin_aus",       "Promedio horas efectivas a la semana (sin ocupados ausentes)",
+  "Prom_hab",               "Promedio horas habitualmente a la semana",
+  "Rama_1_Agric",           "Agricultura, ganadería, silvicultura y pesca",
+  "Rama_2_Mineria",         "Explotación de minas y canteras",
+  "Rama_3_Manuf",           "Industrias manufactureras",
+  "Rama_4_Electr",          "Suministro de electricidad, gas, vapor y aire acondicionado",
+  "Rama_5_Agua",            "Suministro de agua",
+  "Rama_6_Constr",          "Construcción",
+  "Rama_7_Comercio",        "Comercio al por mayor y al por menor",
+  "Rama_8_Transp",          "Transporte y almacenamiento",
+  "Rama_9_Alojam",          "Actividades de alojamiento y de servicio de comidas",
+  "Rama_10_Info",           "Información y comunicaciones",
+  "Rama_11_Financ",         "Actividades financieras y de seguros",
+  "Rama_12_Inmob",          "Actividades inmobiliarias",
+  "Rama_13_Prof",           "Actividades profesionales, científicas y técnicas",
+  "Rama_14_Admin",          "Actividades de servicios administrativos y de apoyo",
+  "Rama_15_AdmPub",         "Administración pública y defensa",
+  "Rama_16_Enseñ",          "Enseñanza",
+  "Rama_17_Salud",          "Actividades de atención de la salud humana y de asistencia social",
+  "Rama_18_Arte",           "Actividades artísticas, de entretenimiento y recreativas",
+  "Rama_19_OtServ",         "Otras actividades de servicios",
+  "Rama_20_Hogares",        "Actividades de los hogares como empleadores",
+  "Rama_21_Extrat",         "Actividades de organizaciones y órganos extraterritoriales",
+  "Rama_1_Agric_F",         "Agricultura, ganadería, silvicultura y pesca formal",
+  "Rama_2_Min_F",           "Explotación de minas y canteras formal",
+  "Rama_3_Man_F",           "Industrias manufactureras formal",
+  "Rama_4_Ele_F",           "Suministro de electricidad, gas, vapor y aire acondicionado formal",
+  "Rama_5_Agu_F",           "Suministro de agua formal",
+  "Rama_6_Con_F",           "Construcción formal",
+  "Rama_7_Com_F",           "Comercio al por mayor y al por menor formal",
+  "Rama_8_Tra_F",           "Transporte y almacenamiento formal",
+  "Rama_9_Alo_F",           "Actividades de alojamiento y de servicio de comidas formal",
+  "Rama_10_Inf_F",          "Información y comunicaciones formal",
+  "Rama_11_Fin_F",          "Actividades financieras y de seguros formal",
+  "Rama_12_Inm_F",          "Actividades inmobiliarias formal",
+  "Rama_13_Pro_F",          "Actividades profesionales, científicas y técnicas formal",
+  "Rama_14_Adm_F",          "Actividades de servicios administrativos y de apoyo formal",
+  "Rama_15_AdP_F",          "Administración pública y defensa formal",
+  "Rama_16_Ens_F",          "Enseñanza formal",
+  "Rama_17_Sal_F",          "Actividades de atención de la salud humana y de asistencia social formal",
+  "Rama_18_Art_F",          "Actividades artísticas, de entretenimiento y recreativas formal",
+  "Rama_19_OtS_F",          "Otras actividades de servicios formal",
+  "Rama_20_Hog_F",          "Actividades de los hogares como empleadores formal",
+  "Rama_21_Ext_F",          "Actividades de organizaciones y órganos extraterritoriales formal",
+  "Rama_1_Agric_I",         "Agricultura, ganadería, silvicultura y pesca informal",
+  "Rama_2_Min_I",           "Explotación de minas y canteras informal",
+  "Rama_3_Man_I",           "Industrias manufactureras informal",
+  "Rama_4_Ele_I",           "Suministro de electricidad, gas, vapor y aire acondicionado informal",
+  "Rama_5_Agu_I",           "Suministro de agua informal",
+  "Rama_6_Con_I",           "Construcción informal",
+  "Rama_7_Com_I",           "Comercio al por mayor y al por menor informal",
+  "Rama_8_Tra_I",           "Transporte y almacenamiento informal",
+  "Rama_9_Alo_I",           "Actividades de alojamiento y de servicio de comidas informal",
+  "Rama_10_Inf_I",          "Información y comunicaciones informal",
+  "Rama_11_Fin_I",          "Actividades financieras y de seguros informal",
+  "Rama_12_Inm_I",          "Actividades inmobiliarias informal",
+  "Rama_13_Pro_I",          "Actividades profesionales, científicas y técnicas informal",
+  "Rama_14_Adm_I",          "Actividades de servicios administrativos y de apoyo informal",
+  "Rama_15_AdP_I",          "Administración pública y defensa informal",
+  "Rama_16_Ens_I",          "Enseñanza informal",
+  "Rama_17_Sal_I",          "Actividades de atención de la salud humana y de asistencia social informal",
+  "Rama_18_Art_I",          "Actividades artísticas, de entretenimiento y recreativas informal",
+  "Rama_19_OtS_I",          "Otras actividades de servicios informal",
+  "Rama_20_Hog_I",          "Actividades de los hogares como empleadores informal",
+  "Rama_21_Ext_I",          "Actividades de organizaciones y órganos extraterritoriales informal"
+)
+
+# Aplicar mapeo
+dt_ENE_Stata <- dt_ENE_Stata %>%
+  left_join(tabla_nombres, by = "categoria_interna") %>%
+  mutate(categoria = if_else(is.na(categoria), categoria_interna, categoria)) %>%
+  select(-categoria_interna)
+
+# ==============================================================================
+# LABELS DE SEXO Y REGIÓN ####
+# ==============================================================================
+
+dt_ENE_Stata <- dt_ENE_Stata %>%
+  mutate(
+    sexo_label = case_when(
+      sexo == 0 ~ "Ambos sexos",
+      sexo == 1 ~ "Hombres",
+      sexo == 2 ~ "Mujeres",
+      TRUE      ~ as.character(sexo)
+    ),
+    sexo = case_when(
+      sexo == 0 ~ "AS",
+      sexo == 1 ~ "H",
+      sexo == 2 ~ "M",
+      TRUE      ~ as.character(sexo)
+    ),
+    region_label = case_when(
+      region ==  0 ~ "Total nacional",
+      region == 15 ~ "Arica y Parinacota",
+      region ==  1 ~ "Tarapacá",
+      region ==  2 ~ "Antofagasta",
+      region ==  3 ~ "Atacama",
+      region ==  4 ~ "Coquimbo",
+      region ==  5 ~ "Valparaíso",
+      region ==  6 ~ "O'Higgins",
+      region ==  7 ~ "Maule",
+      region == 16 ~ "Ñuble",
+      region ==  8 ~ "Biobío",
+      region ==  9 ~ "La Araucanía",
+      region == 14 ~ "Los Ríos",
+      region == 10 ~ "Los Lagos",
+      region == 11 ~ "Aysén",
+      region == 12 ~ "Magallanes",
+      region == 13 ~ "Metropolitana",
+      TRUE         ~ as.character(region)
+    ),
+    region = case_when(
+      region ==  0 ~ "TT",
+      region == 15 ~ "AP",
+      region ==  1 ~ "TA",
+      region ==  2 ~ "AN",
+      region ==  3 ~ "AT",
+      region ==  4 ~ "CO",
+      region ==  5 ~ "VA",
+      region ==  6 ~ "LI",
+      region ==  7 ~ "ML",
+      region == 16 ~ "NB",
+      region ==  8 ~ "BI",
+      region ==  9 ~ "AR",
+      region == 14 ~ "LR",
+      region == 10 ~ "LL",
+      region == 11 ~ "AI",
+      region == 12 ~ "MA",
+      region == 13 ~ "RM",
+      TRUE         ~ as.character(region)
+    )
+  ) %>%
+  select(periodo, fecha, sexo, sexo_label, region, region_label, categoria, valor)
+
+# ==============================================================================
+# LIMPIEZA POR VIGENCIA DE VARIABLES ####
+# ==============================================================================
+
+cats_desde_JAS2017 <- c(
+  "Ocupados formales", "Ocupados informales",
+  "Empleadores formales", "Empleadores informales",
+  "Cuenta propia formales", "Cuenta propia informales",
+  "Asalariados privado formales", "Asalariados privado informales",
+  "Asalariados público formales", "Asalariados público informales",
+  "Servicio doméstico formales", "Servicio doméstico informales",
+  "Familiar no rem informales",
+  "Asalariados_dep_Form", "Asalariados_dep_Inform", "Asalariados_dep",
+  "T_Informal", "Form_PET", "Inform_PET", "Deficit_form", "Deficit_inform",
+  "Agricultura, ganadería, silvicultura y pesca",
+  "Explotación de minas y canteras", "Industrias manufactureras",
+  "Suministro de electricidad, gas, vapor y aire acondicionado",
+  "Suministro de agua", "Construcción",
+  "Comercio al por mayor y al por menor", "Transporte y almacenamiento",
+  "Actividades de alojamiento y de servicio de comidas",
+  "Información y comunicaciones", "Actividades financieras y de seguros",
+  "Actividades inmobiliarias",
+  "Actividades profesionales, científicas y técnicas",
+  "Actividades de servicios administrativos y de apoyo",
+  "Administración pública y defensa", "Enseñanza",
+  "Actividades de atención de la salud humana y de asistencia social",
+  "Actividades artísticas, de entretenimiento y recreativas",
+  "Otras actividades de servicios",
+  "Actividades de los hogares como empleadores",
+  "Actividades de organizaciones y órganos extraterritoriales",
+  "Agricultura, ganadería, silvicultura y pesca formal",
+  "Explotación de minas y canteras formal", "Industrias manufactureras formal",
+  "Suministro de electricidad, gas, vapor y aire acondicionado formal",
+  "Suministro de agua formal", "Construcción formal",
+  "Comercio al por mayor y al por menor formal",
+  "Transporte y almacenamiento formal",
+  "Actividades de alojamiento y de servicio de comidas formal",
+  "Información y comunicaciones formal",
+  "Actividades financieras y de seguros formal",
+  "Actividades inmobiliarias formal",
+  "Actividades profesionales, científicas y técnicas formal",
+  "Actividades de servicios administrativos y de apoyo formal",
+  "Administración pública y defensa formal", "Enseñanza formal",
+  "Actividades de atención de la salud humana y de asistencia social formal",
+  "Actividades artísticas, de entretenimiento y recreativas formal",
+  "Otras actividades de servicios formal",
+  "Actividades de los hogares como empleadores formal",
+  "Actividades de organizaciones y órganos extraterritoriales formal",
+  "Agricultura, ganadería, silvicultura y pesca informal",
+  "Explotación de minas y canteras informal",
+  "Industrias manufactureras informal",
+  "Suministro de electricidad, gas, vapor y aire acondicionado informal",
+  "Suministro de agua informal", "Construcción informal",
+  "Comercio al por mayor y al por menor informal",
+  "Transporte y almacenamiento informal",
+  "Actividades de alojamiento y de servicio de comidas informal",
+  "Información y comunicaciones informal",
+  "Actividades financieras y de seguros informal",
+  "Actividades inmobiliarias informal",
+  "Actividades profesionales, científicas y técnicas informal",
+  "Actividades de servicios administrativos y de apoyo informal",
+  "Administración pública y defensa informal", "Enseñanza informal",
+  "Actividades de atención de la salud humana y de asistencia social informal",
+  "Actividades artísticas, de entretenimiento y recreativas informal",
+  "Otras actividades de servicios informal",
+  "Actividades de los hogares como empleadores informal",
+  "Actividades de organizaciones y órganos extraterritoriales informal"
+)
+
+cats_desde_EFM2017 <- c(
+  "Directores, gerentes y administradores",
+  "Profesionales, científicos e intelectuales",
+  "Técnicos y profesionales de nivel medio",
+  "Personal de apoyo administrativo",
+  "Trabajadores de los servicios y vendedores de comercios y mercados",
+  "Agricultores y trabajadores calificados agropecuarios, forestales y pesqueros",
+  "Artesanos y operarios de oficios",
+  "Operadores de instalaciones, maquinas y ensambladores",
+  "Ocupaciones elementales",
+  "Directores, gerentes y administradores formal",
+  "Profesionales, científicos e intelectuales formal",
+  "Técnicos y profesionales de nivel medio formal",
+  "Personal de apoyo administrativo formal",
+  "Trabajadores de los servicios y vendedores de comercios y mercados formal",
+  "Agricultores y trabajadores calificados agropecuarios, forestales y pesqueros formal",
+  "Artesanos y operarios de oficios formal",
+  "Operadores de instalaciones, maquinas y ensambladores formal",
+  "Ocupaciones elementales formal",
+  "Directores, gerentes y administradores informal",
+  "Profesionales, científicos e intelectuales informal",
+  "Técnicos y profesionales de nivel medio informal",
+  "Personal de apoyo administrativo informal",
+  "Trabajadores de los servicios y vendedores de comercios y mercados informal",
+  "Agricultores y trabajadores calificados agropecuarios, forestales y pesqueros informal",
+  "Artesanos y operarios de oficios informal",
+  "Operadores de instalaciones, maquinas y ensambladores informal",
+  "Ocupaciones elementales informal"
+)
+
+dt_ENE_Stata <- dt_ENE_Stata %>%
+  filter(
+    !(categoria %in% cats_desde_JAS2017 & periodo < 201708),
+    !(categoria %in% cats_desde_EFM2017 & periodo < 201703)
+  )
+
+
+# ==============================================================================
+# TABLA EDAD — resumen_Edad → largo → bind con dt_ENE_Stata ####
+# categoria = nombre canónico + "-" + tramo (ej. "Ocupados-15 a 19 años")
+# ==============================================================================
+
+# Mapeo nombre interno → nombre canónico (incluye tasas calculadas en derivadas)
+vars_edad <- tribble(
+  ~col_interna,        ~categoria_base,
+  "Poblacion",         "Población",
+  "PET",               "PET",
+  "FT",                "Fuerza de Trabajo",
+  "Ocupados",          "Ocupados",
+  "Ocup_formales",     "Ocupados formales",
+  "Ocup_informales",   "Ocupados informales",
+  "Desocupados",       "Desocupados",
+  "Cesantes",          "Cesantes",
+  "B_t_p_v",           "B_t_p_v",
+  "FFT",               "FFT",
+  "FFT_Iniciadores",   "FFT_Iniciadores",
+  "FFT_Inactivos_PA",  "FFT_Inactivos_PA",
+  "FFT_Inactivos_H",   "FFT_Inactivos_H",
+  "T_desocupacion",    "Tasa de desocupación",
+  "T_ocupacion",       "Tasa de ocupación",
+  "T_participacion",   "Tasa de participación",
+  "T_Informal",        "Tasa de ocupación informal",
+  "T_Cesantia",        "Tasa de cesantía",
+  "T_Btrab",           "Tasa búsqueda trabajo"
+)
+
+tasas_edad <- c(
+  "Tasa de desocupación", "Tasa de ocupación", "Tasa de participación",
+  "Tasa de ocupación informal", "Tasa de cesantía", "Tasa búsqueda trabajo"
+)
+
+dt_edad <- resumen_Edad %>%
+  filter(!is.na(tramo_edad)) %>%
+  mutate(tramo_label = tramo_edad) %>%
+  pivot_longer(
+    cols      = all_of(vars_edad$col_interna),
+    names_to  = "col_interna",
+    values_to = "valor"
+  ) %>%
+  left_join(vars_edad, by = "col_interna") %>%
+  filter(!is.na(valor)) %>%
+  mutate(
+    categoria = paste0(categoria_base, "-", tramo_label),
+    valor     = if_else(categoria_base %in% tasas_edad,
+                        round(valor, 1),
+                        round(valor, 0)),
+    sexo_label = case_when(
+      sexo == 0 ~ "Ambos sexos",
+      sexo == 1 ~ "Hombres",
+      sexo == 2 ~ "Mujeres",
+      TRUE      ~ as.character(sexo)
+    ),
+    sexo = case_when(
+      sexo == 0 ~ "AS", sexo == 1 ~ "H", sexo == 2 ~ "M",
+      TRUE      ~ as.character(sexo)
+    ),
+    region_label = case_when(
+      region ==  0 ~ "Total nacional",
+      region == 15 ~ "Arica y Parinacota",
+      region ==  1 ~ "Tarapacá",
+      region ==  2 ~ "Antofagasta",
+      region ==  3 ~ "Atacama",
+      region ==  4 ~ "Coquimbo",
+      region ==  5 ~ "Valparaíso",
+      region ==  6 ~ "O'Higgins",
+      region ==  7 ~ "Maule",
+      region == 16 ~ "Ñuble",
+      region ==  8 ~ "Biobío",
+      region ==  9 ~ "La Araucanía",
+      region == 14 ~ "Los Ríos",
+      region == 10 ~ "Los Lagos",
+      region == 11 ~ "Aysén",
+      region == 12 ~ "Magallanes",
+      region == 13 ~ "Metropolitana",
+      TRUE         ~ as.character(region)
+    ),
+    region = case_when(
+      region ==  0 ~ "TT", region == 15 ~ "AP", region ==  1 ~ "TA",
+      region ==  2 ~ "AN", region ==  3 ~ "AT", region ==  4 ~ "CO",
+      region ==  5 ~ "VA", region ==  6 ~ "LI", region ==  7 ~ "ML",
+      region == 16 ~ "NB", region ==  8 ~ "BI", region ==  9 ~ "AR",
+      region == 14 ~ "LR", region == 10 ~ "LL", region == 11 ~ "AI",
+      region == 12 ~ "MA", region == 13 ~ "RM", TRUE ~ as.character(region)
+    )
+  ) %>%
+  select(periodo, fecha, sexo, sexo_label, region, region_label, categoria, valor)
+
+dt_ENE_Stata <- bind_rows(dt_ENE_Stata, dt_edad)
+
+message("Edad agregada: ", nrow(dt_edad), " filas | ",
+        n_distinct(dt_edad$periodo), " períodos | ",
+        n_distinct(dt_edad$categoria), " categorías edad")
+
+# ==============================================================================
+# GUARDAR ####
+# ==============================================================================
+
+save(dt_ENE_Stata,
+     file = file.path(dire_out, "dt_ENE_Stata.RData"))
+
+message("Guardado: ",
+        nrow(dt_ENE_Stata), " filas | ",
+        n_distinct(dt_ENE_Stata$periodo), " períodos | ",
+        n_distinct(dt_ENE_Stata$categoria), " categorías.")

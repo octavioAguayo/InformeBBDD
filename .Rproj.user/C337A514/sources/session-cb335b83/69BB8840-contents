@@ -1,0 +1,151 @@
+# ENE_4_Calidad_Categorias.R - v4 - 22-08-2026
+# Control, no producción: perfil de una línea por categoría de dt_ENE_Master,
+# para leerse de corrido. No modifica nada. Correr después de la maestra.
+
+if (!exists("fc_init_motor"))
+  source(file.path(dirname(getwd()), "Bibliotecas_R", "funciones_pipeline.R"))
+source(file.path(dirname(getwd()), "Bibliotecas_R", "funciones_formato.R"))
+
+fc_init_motor(c("dplyr", "tidyr"))
+
+dire_out <- file.path(dirname(dirname(getwd())), "Datos_Ine", "ENE", "bbdd_minuta")
+load(file.path(dire_out, "dt_ENE_Master.RData"))
+
+# ==============================================================================
+# VOCABULARIO CANÓNICO ####
+# Se resuelve antes de la tabla para que `en_canon` y `clave_norm` sean columnas
+# y no tablas aparte: leyendo de corrido, el flag tiene que estar en la fila.
+# ==============================================================================
+
+fc_norm <- function(x) {
+  x <- chartr("áéíóúüñÁÉÍÓÚÜÑ", "aeiouunAEIOUUN", x)
+  gsub("\\s+", " ", trimws(tolower(x)))
+}
+
+tramos_ine <- c("15 a 19 años", "20 a 24 años", "25 a 29 años", "30 a 34 años",
+                "35 a 39 años", "40 a 44 años", "45 a 49 años", "50 a 54 años",
+                "55 a 59 años", "60 a 64 años", "65 a 69 años", "70 años o más")
+
+source(file.path(dirname(getwd()), "Bibliotecas_R",
+                 "ENE_diccionario_categorias.R"), encoding = "UTF-8")
+
+es_plantilla <- !is.na(diccionario_ene$corte) & diccionario_ene$corte != ""
+esperadas <- diccionario_ene$categoria[!es_plantilla]
+for (t in tramos_ine)
+  esperadas <- c(esperadas,
+                 sub("{tramo}", t, diccionario_ene$categoria[es_plantilla], fixed = TRUE))
+
+# ==============================================================================
+# PERFIL POR CATEGORÍA ####
+# ==============================================================================
+
+calidad_categorias <- dt_ENE_Master %>%
+  group_by(categoria) %>%
+  summarise(
+    n           = n(),
+    per_min     = min(periodo),
+    per_max     = max(periodo),
+    n_periodos  = n_distinct(periodo),
+    n_sexo      = n_distinct(sexo),
+    n_region    = n_distinct(region),
+    valor_min   = min(valor, na.rm = TRUE),
+    valor_max   = max(valor, na.rm = TRUE),
+    pct_cero    = round(mean(valor == 0, na.rm = TRUE) * 100, 1),
+    .groups     = "drop"
+  ) %>%
+  mutate(
+    en_canon   = categoria %in% esperadas,   # ¿está en el diccionario?
+    clave_norm = fc_norm(categoria)          # tildes y mayúsculas normalizadas
+  ) %>%
+  # Ordenado por la clave normalizada: así "Producción" y "Produccion" quedan
+  # en líneas contiguas y saltan a la vista al leer.
+  arrange(clave_norm) %>%
+  select(categoria, en_canon, n, per_min, per_max, n_periodos,
+         n_sexo, n_region, valor_min, valor_max, pct_cero, clave_norm)
+
+# Períodos iniciales en que TODAS las celdas valen cero. Es la firma de una
+# vigencia mal declarada: la variable fuente todavía no existía y la suma de un
+# vector vacío devuelve 0, no NA.
+ceros_inicio <- dt_ENE_Master %>%
+  group_by(categoria, periodo) %>%
+  summarise(todo_cero = all(valor == 0, na.rm = TRUE), .groups = "drop") %>%
+  arrange(categoria, periodo) %>%
+  group_by(categoria) %>%
+  summarise(
+    per_cero_inicio = {
+      r <- rle(todo_cero)
+      if (length(r$values) > 0 && isTRUE(r$values[1])) r$lengths[1] else 0L
+    },
+    .groups = "drop"
+  )
+
+calidad_categorias <- calidad_categorias %>%
+  left_join(ceros_inicio, by = "categoria")
+
+# ==============================================================================
+# HALLAZGOS ####
+# ==============================================================================
+
+# --- 1. Duplicados por tilde, mayúscula o espacios --------------------------
+# El caso "Producción" vs "Produccion": dos categorías distintas para la misma
+# cosa, que un group_by nunca junta y que ningún filter encuentra completas.
+casi_duplicadas <- calidad_categorias %>%
+  group_by(clave_norm) %>%
+  filter(n() > 1) %>%
+  ungroup() %>%
+  arrange(clave_norm, categoria) %>%
+  select(clave_norm, categoria, en_canon, n, per_min, per_max)
+
+# --- 2. Categorías que no están en el diccionario ---------------------------
+fuera_diccionario <- calidad_categorias %>% filter(!en_canon)
+
+nunca_publicadas <- setdiff(esperadas, calidad_categorias$categoria)
+
+# --- 3. Cobertura anómala ---------------------------------------------------
+# Lo normal es 3 sexos (AS/H/M) y 17 regiones (TT + 16).
+cobertura_rara <- calidad_categorias %>%
+  filter(n_sexo != 3 | n_region != 17) %>%
+  select(categoria, n, n_sexo, n_region, per_min, per_max)
+
+# --- 4. Huecos de período ---------------------------------------------------
+periodos_todos <- sort(unique(dt_ENE_Master$periodo))
+con_huecos <- calidad_categorias %>%
+  mutate(esperados = vapply(seq_len(n()), function(i)
+           sum(periodos_todos >= per_min[i] & periodos_todos <= per_max[i]),
+           integer(1))) %>%
+  filter(n_periodos < esperados) %>%
+  mutate(faltan = esperados - n_periodos) %>%
+  select(categoria, per_min, per_max, n_periodos, esperados, faltan)
+
+# --- 5. Ceros al inicio de la serie -----------------------------------------
+ceros_sospechosos <- calidad_categorias %>%
+  filter(per_cero_inicio > 0) %>%
+  select(categoria, per_min, per_cero_inicio, pct_cero) %>%
+  arrange(desc(per_cero_inicio))
+
+# ==============================================================================
+# INFORME ####
+# ==============================================================================
+
+fc_bloque <- function(titulo, tabla, cols = NULL) {
+  message("\n── ", titulo, ": ", nrow(tabla))
+  if (nrow(tabla) > 0)
+    print(as.data.frame(if (is.null(cols)) tabla else tabla[cols]), row.names = FALSE)
+}
+
+message("dt_ENE_Master: ", nrow(dt_ENE_Master), " filas | ",
+        nrow(calidad_categorias), " categorías | ",
+        length(periodos_todos), " períodos (",
+        min(periodos_todos), "-", max(periodos_todos), ")")
+
+fc_bloque("Casi duplicadas (tilde / mayúscula / espacios)", casi_duplicadas)
+fc_bloque("Fuera del diccionario", fuera_diccionario,
+          c("categoria", "n", "per_min", "per_max"))
+message("\n── En el diccionario pero nunca publicadas: ", length(nunca_publicadas))
+if (length(nunca_publicadas)) print(nunca_publicadas)
+fc_bloque("Cobertura anómala (sexo != 3 o region != 17)", cobertura_rara)
+fc_bloque("Con huecos de período", con_huecos)
+fc_bloque("Ceros al inicio de la serie", ceros_sospechosos)
+
+message("\nTabla completa en `calidad_categorias`. ",
+        "Para leerla de corrido: View(calidad_categorias)")

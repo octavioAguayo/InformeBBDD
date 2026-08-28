@@ -1,0 +1,252 @@
+# ENE_3_Derivadas_Master_dta.R - v6 - 22-08-2026
+# Calcula derivadas, aplica el canon de nombres y la vigencia, agrega la rama
+# de edad y exporta dt_ENE_Stata.
+# Entrada: ENE_2_SexoRegionEdad.RData + ENE_diccionario_categorias.R
+
+source(file.path(dirname(getwd()), "Bibliotecas_R", "funciones_pipeline.R"))
+source(file.path(dirname(getwd()), "Bibliotecas_R", "funciones_formato.R"))
+source(file.path(dirname(getwd()), "Bibliotecas_R", "funciones_ene.R"))
+source(file.path(dirname(getwd()), "Bibliotecas_R", "fc_diccionario_ene.R"))
+
+# openxlsx y readr ya no hacen falta: el diccionario se sourcea.
+fc_init_motor(c("dplyr", "tidyr", "lubridate"))
+
+dire_out           <- file.path(dirname(dirname(getwd())), "Datos_Ine", "ENE", "bbdd_minuta")
+fecha_Inicio_Covid <- as.Date("2020-01-01")
+
+# ==============================================================================
+# CARGAR COLAPSO Y DICCIONARIO ####
+# ==============================================================================
+
+load(file.path(dire_out, "ENE_2_SexoRegionEdad.RData"))
+
+# Solo las filas base: las marcadas con corte son plantillas de inventario,
+# la composición con el tramo se arma abajo con fc_categoria().
+diccionario <- fc_diccionario() %>% filter(is.na(corte) | corte == "")
+
+# ==============================================================================
+# VARIABLES DERIVADAS ####
+# ==============================================================================
+
+# Base COVID para Deficit_form / Deficit_inform
+base_covid <- resumen_SexoRegion %>%
+  filter(fecha == fecha_Inicio_Covid) %>%
+  select(sexo, region, Ocup_formales, Ocup_informales, PET) %>%
+  rename(Ocup_form_base = Ocup_formales,
+         Ocup_inf_base  = Ocup_informales,
+         PET_base       = PET)
+
+resumen_wide <- resumen_SexoRegion %>%
+  left_join(base_covid, by = c("sexo", "region")) %>%
+  mutate(
+    # Agrupaciones
+    ServDom        = ServDom_afuera + ServDom_adentro,
+    Independientes = Empleadores + Cuenta_propia + Familiares_no_rem,
+    Dependientes   = Asal_privados + Asal_publico + ServDom_afuera + ServDom_adentro,
+    Asalariados    = Asal_privados + Asal_publico,
+    Asl_dep_Form   = AslPriv_form + AslPub_form + ServDom_form,
+    Asl_dep_Inform = AslPriv_inf  + AslPub_inf  + ServDom_inf,
+    Asl_dep        = Asl_dep_Form + Asl_dep_Inform,
+    Ocup_Privado   = Ocupados - Asal_publico,
+    
+    # Identidad por exclusión — ver nota metodológica en arquitectura_ENE_cubo.txt
+    H_TPV          = H_1_30 - H_TPI - H_TPI_SIvol,
+    
+    # Tasas
+    T_desocupacion  = round(Desocupados      / FT            * 100, 1),
+    T_ocupacion     = round(Ocupados         / PET           * 100, 1),
+    T_participacion = round(FT               / PET           * 100, 1),
+    T_Informal      = round(Ocup_informales  / Ocupados      * 100, 1),
+    T_Cesantia      = round(Cesantes         / FT            * 100, 1),
+    T_Btrab         = round(B_t_p_v          / FT            * 100, 1),
+    T_presion_lab   = round((Desocupados + Iniciadores_disp + Ocup_buscaron_empleo) /
+                              (FT + Iniciadores_disp)        * 100, 1),
+    SU1             = round((Desocupados + Iniciadores_disp) /
+                              (FT + Iniciadores_disp)        * 100, 1),
+    SU2             = round((Desocupados + Iniciadores_disp + Tiemp_parcial_involunt) /
+                              (FT + Iniciadores_disp)        * 100, 1),
+    SU3             = round((Desocupados + Iniciadores_disp + FT_potencial) /
+                              FT_ampliada                    * 100, 1),
+    SU4             = round((Desocupados + Iniciadores_disp +
+                               Tiemp_parcial_involunt + FT_potencial) /
+                              FT_ampliada                    * 100, 1),
+    
+    # Promedios de horas — usan auxiliares de paso
+    Prom_hef_con_aus = round(Hef_sum_con_aus / Hef_n_con_aus, 1),
+    Prom_hef_sin_aus = round(Hef_sum_sin_aus / Hef_n_sin_aus, 1),
+    Prom_hab         = round(Hab_sum         / Hab_n,         1),
+    
+    # Déficit
+    Form_PET       = round(Ocup_formales   / PET * 100, 1),
+    Inform_PET     = round(Ocup_informales / PET * 100, 1),
+    Deficit_form   = if_else(!is.na(Ocup_form_base),
+                             Ocup_formales  - (Ocup_form_base / PET_base) * PET,
+                             NA_real_),
+    Deficit_inform = if_else(!is.na(Ocup_inf_base),
+                             Ocup_informales - (Ocup_inf_base / PET_base) * PET,
+                             NA_real_)
+  ) %>%
+  select(-Ocup_form_base, -Ocup_inf_base, -PET_base)
+
+# Descartar auxiliares de paso
+resumen_wide <- resumen_wide %>%
+  select(-Hef_sum_con_aus, -Hef_n_con_aus,
+         -Hef_sum_sin_aus, -Hef_n_sin_aus,
+         -Hab_sum, -Hab_n)
+
+# ==============================================================================
+# VARIABLES DERIVADAS PARA EDAD ####
+# Solo tasas — las agrupaciones (ServDom, Independientes, etc.) no están
+# disponibles en resumen_Edad porque el colapso 2 solo trae stocks básicos
+# ==============================================================================
+
+resumen_Edad <- resumen_Edad %>%
+  mutate(
+    T_desocupacion  = round(Desocupados      / FT       * 100, 1),
+    T_ocupacion     = round(Ocupados         / PET      * 100, 1),
+    T_participacion = round(FT               / PET      * 100, 1),
+    T_Informal      = round(Ocup_informales  / Ocupados * 100, 1),
+    T_Cesantia      = round(Cesantes         / FT       * 100, 1),
+    T_Btrab         = round(B_t_p_v          / FT       * 100, 1)
+  )
+
+# ==============================================================================
+# PIVOT A FORMATO LARGO — ambas ramas a la misma estructura ####
+# Se unen ANTES de aplicar canon y vigencia, para que las dos reciban
+# exactamente el mismo tratamiento.
+# ==============================================================================
+
+largo_sr <- resumen_wide %>%
+  pivot_longer(cols      = -c(periodo, fecha, sexo, region),
+               names_to  = "col_interna",
+               values_to = "valor") %>%
+  mutate(tramo = NA_character_)
+
+vars_edad <- intersect(names(resumen_Edad),
+                       diccionario$col_interna)
+
+largo_edad <- resumen_Edad %>%
+  filter(!is.na(tramo_edad)) %>%
+  pivot_longer(cols      = all_of(vars_edad),
+               names_to  = "col_interna",
+               values_to = "valor") %>%
+  rename(tramo = tramo_edad) %>%
+  select(periodo, fecha, sexo, region, col_interna, valor, tramo)
+
+dt_ENE_Stata <- bind_rows(largo_sr, largo_edad) %>%
+  filter(!is.na(valor))
+
+# ==============================================================================
+# CANON DE NOMBRES ####
+# Un solo diccionario para las dos ramas. Falla si aparece una columna nueva
+# sin entrada: es la garantía de que nada se publique fuera del canon.
+# ==============================================================================
+
+faltan <- setdiff(unique(dt_ENE_Stata$col_interna), diccionario$col_interna)
+if (length(faltan))
+  stop("Columnas sin entrada en el diccionario: ", paste(faltan, collapse = ", "),
+       "\nAgrégalas a ENE_diccionario_categorias.R antes de correr.")
+
+dt_ENE_Stata <- dt_ENE_Stata %>%
+  left_join(select(diccionario, col_interna, categoria, vigencia_desde),
+            by = "col_interna") %>%
+  mutate(
+    # La etiqueta base viene del diccionario; el corte se compone acá con el
+    # separador del canon. Nadie vuelve a tipear un nombre compuesto.
+    categoria = if_else(is.na(tramo), categoria, paste0(categoria, SEP, tramo)),
+    # El redondeo se aplica SOLO a la rama de edad, igual que antes.
+    # La rama sexo-región conserva sus valores sin redondear.
+    valor     = if_else(is.na(tramo), valor,
+                        if_else(grepl("^Tasa", categoria),
+                                round(valor, 1), round(valor, 0)))
+  ) %>%
+  select(-col_interna, -tramo)
+
+# ==============================================================================
+# VIGENCIA ####
+# Reemplaza a cats_desde_JAS2017 / cats_desde_EFM2017. Corre DESPUÉS del bind,
+# de modo que la rama de edad también queda cubierta.
+# Fuente: codigos-ene-2020_actual.pdf, columna Observaciones.
+# ==============================================================================
+
+n_antes <- nrow(dt_ENE_Stata)
+dt_ENE_Stata <- dt_ENE_Stata %>%
+  filter(periodo >= vigencia_desde) %>%
+  select(-vigencia_desde)
+
+message("Vigencia: ", n_antes - nrow(dt_ENE_Stata), " filas descartadas por ",
+        "anteceder a la fecha de disponibilidad de su variable fuente.")
+
+# ==============================================================================
+# LABELS DE SEXO Y REGIÓN ####
+# ==============================================================================
+
+dt_ENE_Stata <- dt_ENE_Stata %>%
+  mutate(
+    sexo_label = case_when(
+      sexo == 0 ~ "Ambos sexos",
+      sexo == 1 ~ "Hombres",
+      sexo == 2 ~ "Mujeres",
+      TRUE      ~ as.character(sexo)
+    ),
+    sexo = case_when(
+      sexo == 0 ~ "AS",
+      sexo == 1 ~ "H",
+      sexo == 2 ~ "M",
+      TRUE      ~ as.character(sexo)
+    ),
+    region_label = case_when(
+      region ==  0 ~ "Total nacional",
+      region == 15 ~ "Arica y Parinacota",
+      region ==  1 ~ "Tarapacá",
+      region ==  2 ~ "Antofagasta",
+      region ==  3 ~ "Atacama",
+      region ==  4 ~ "Coquimbo",
+      region ==  5 ~ "Valparaíso",
+      region ==  6 ~ "O'Higgins",
+      region ==  7 ~ "Maule",
+      region == 16 ~ "Ñuble",
+      region ==  8 ~ "Biobío",
+      region ==  9 ~ "La Araucanía",
+      region == 14 ~ "Los Ríos",
+      region == 10 ~ "Los Lagos",
+      region == 11 ~ "Aysén",
+      region == 12 ~ "Magallanes",
+      region == 13 ~ "Metropolitana",
+      TRUE         ~ as.character(region)
+    ),
+    region = case_when(
+      region ==  0 ~ "TT",
+      region == 15 ~ "AP",
+      region ==  1 ~ "TA",
+      region ==  2 ~ "AN",
+      region ==  3 ~ "AT",
+      region ==  4 ~ "CO",
+      region ==  5 ~ "VA",
+      region ==  6 ~ "LI",
+      region ==  7 ~ "ML",
+      region == 16 ~ "NB",
+      region ==  8 ~ "BI",
+      region ==  9 ~ "AR",
+      region == 14 ~ "LR",
+      region == 10 ~ "LL",
+      region == 11 ~ "AI",
+      region == 12 ~ "MA",
+      region == 13 ~ "RM",
+      TRUE         ~ as.character(region)
+    )
+  ) %>%
+  select(periodo, fecha, sexo, sexo_label, region, region_label, categoria, valor) %>%
+  arrange(periodo, sexo, region, categoria)
+
+# ==============================================================================
+# GUARDAR ####
+# ==============================================================================
+
+save(dt_ENE_Stata,
+     file = file.path(dire_out, "dt_ENE_Stata.RData"))
+
+message("Guardado: ",
+        nrow(dt_ENE_Stata), " filas | ",
+        n_distinct(dt_ENE_Stata$periodo), " períodos | ",
+        n_distinct(dt_ENE_Stata$categoria), " categorías.")
